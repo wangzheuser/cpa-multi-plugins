@@ -44,6 +44,7 @@ func withFrozenHoldTables(t *testing.T, now time.Time) {
 //	6004               -> NOT tabled (model_ratelimit.go owns it)
 //	hard credit        -> NOT tabled (account-level lifecycle owns it)
 //	429 / soft limit   -> rate_limit hold (300 s)
+//	provider fault     -> model_provider_fault hold (60 s, issue #80)
 //	empty stream       -> unknown hold (60 s)
 //	in-stream frame    -> unknown hold (60 s)  <- the daily-quota shape
 //	transport wording  -> NOT tabled (qoder parity)
@@ -58,6 +59,9 @@ func TestRecordUpstreamFailureMatrix(t *testing.T) {
 	}{
 		{"6004 defers to own registry", http.StatusTooManyRequests, modelRateLimitSamplePayload, false, ""},
 		{"hard credit stays account-level", 0, "积分不足，请充值", false, ""},
+		{"model provider fault (issue #80)", http.StatusInternalServerError, issue80FaultPayload, true, cooldownReasonProviderFault},
+		{"plain 500 without the family code", http.StatusInternalServerError, `{"code":50001,"msg":"service temporarily unavailable"}`, false, ""},
+		{"11134 on a 4xx stays out (11102/11115 lane)", http.StatusBadRequest, issue80FaultPayload, false, ""},
 		{"429 status", http.StatusTooManyRequests, `{"code":11120,"msg":"slow down"}`, true, cooldownReasonRateLimit},
 		{"soft limit wording", 0, "upstream rate limit exceeded", true, cooldownReasonRateLimit},
 		{"empty stream", 0, emptyStreamError().Error(), true, cooldownReasonUnknown},

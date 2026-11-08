@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.9.89
+
+### Model-level provider faults (HTTP 500, code 11134) cool the faulted pair (issue #80)
+
+With `scheduler_mode: credits` + `scheduler_priority_reclaim: true`, an
+upstream model-level fault — HTTP 500 with
+`{"code":11134,"msg":"the model provider is temporarily unavailable, please
+retry later or switch to another model"}` — was recorded by nothing: not the
+6004 registry (429-only), not the account-level path (not a credit error),
+not the #35 cooldown table (a plain 500 matches no route). The failed
+(credential, model) pair stayed "live" and priority reclaim re-served it on
+every pick — the reporter observed the same dead pair re-selected 5m18s
+apart while healthy candidates never rotated in.
+
+- `isModelProviderFault` (chat_error.go, next to its 11102 sibling): the
+  business-code classifier — JSON envelope first (int / string / hyphenated
+  spellings via `wireCodeIs`, the #75 lesson), substring fallback for
+  envelope variants, and a code+wording conjunction that never fires on the
+  50001 "service temporarily unavailable" frames the #35 matrix already
+  handles. Status guard: 5xx and 0 (in-stream frame texts / sync-collector
+  errors embedding the envelope); 4xx stays in the 11102/11115 lane.
+- `recordUpstreamFailure` routes the family into the #35 table at the
+  conservative `modelCooldownUnknown` 60 s window — deliberately NOT the
+  300 s rate-limit tier (a fault is not a throttle, no reset is declared).
+  A declared reset instant in the envelope wins when parsable, anchored to
+  the table clock like the daily-quota branch; none has been observed yet.
+  Because the pair now sits in the #35 table, scheduler pick, catalog
+  filter and the executor fast-fail all see it through the existing joins
+  (the #76 contract) — no new consumer wiring was needed.
+- New reason `model_provider_fault`: the merged operator listing (#77)
+  names it, the panel badge reads 模型服务故障 11134, and the fast-fail
+  copy is reason-aware (names the code, the ~60 s self-re-probe, and that
+  other models / credentials are unaffected; never carries "429").
+- `translateChatUpstreamErrorFull` replaces the raw "upstream 500: {...}"
+  pass-through with bilingual copy carrying upstream's switch-model advice;
+  `upstreamStatusError` keeps the error plain (status 0) so no host version
+  cools the whole credential on a model-scoped fault — the 6004 policy,
+  applied to its 5xx sibling.
+
 ## 0.9.88
 
 ### 6004 windows are now operator-visible: one merged cooldown surface (issue #77)

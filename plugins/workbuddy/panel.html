@@ -1191,7 +1191,7 @@ async function modelGroupsSave(btn){
    登记表的合并视图（reason=model_rate_limit 即 6004 窗口）。
    解除：POST /cooldowns/clear {auth_id[, model]} —— 两表同清。 */
 let coolCtlOpen=false;
-const COOL_REASON={"model_rate_limit":"模型限流 6004","daily_quota":"每日限额","rate_limit":"频率限制","upstream_error":"上游异常"};
+const COOL_REASON={"model_rate_limit":"模型限流 6004","model_provider_fault":"模型服务故障 11134","daily_quota":"每日限额","rate_limit":"频率限制","upstream_error":"上游异常"};
 function coolCtlToggle(btn){
   const c=document.getElementById("coolCtlCard");
   coolCtlOpen=!coolCtlOpen;

@@ -44,6 +44,62 @@ func isModelNotRegistered(statusCode int, payload string) bool {
 	return strings.Contains(low, "11102") && strings.Contains(low, "service info not found")
 }
 
+// isModelProviderFault reports the model-level provider-fault rejection:
+// HTTP 500 carrying business code 11134 —
+//
+//	{"code":11134,"msg":"the model provider is temporarily unavailable,
+//	please retry later or switch to another model",
+//	"extError":{"code":"internal_error"|"service_unavailable"}}
+//
+// Issue #80 (sciman-top, 2026-11-07): "switch to another model" is the
+// upstream declaring the fault MODEL-scoped — the same semantics that gave
+// 6004 its dedicated registry — yet the family declares no reset instant,
+// so it routes into the #35 cooldown table at the conservative unknown
+// window (60 s, re-probed on expiry) instead. It is deliberately NOT the
+// 300 s rate-limit tier: a fault is not a throttle, and no Retry-After or
+// reset is declared. extError is flavor, not a classifier input.
+//
+// Status guard: the documented family arrives on 5xx. Status 0 accepts the
+// in-stream frame texts and sync-collector errors that embed the envelope
+// (the frame detector truncates at 200 chars — the code and the "model
+// provider" wording both live well inside that budget). 4xx shapes stay
+// out: 11102/11115 own those, and no 4xx 11134 has ever been observed.
+func isModelProviderFault(statusCode int, payload string) bool {
+	if statusCode != 0 && statusCode < http.StatusInternalServerError {
+		return false
+	}
+	var shape struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(payload), &shape); err == nil && wireCodeIs(shape.Code, "11134") {
+		return true
+	}
+	// Envelope-variant fallback: non-JSON bodies still carrying the code
+	// spelling (space-stripped; quoted and hyphenated forms — the #75 lesson
+	// on wire-code spellings).
+	low := strings.ReplaceAll(payload, " ", "")
+	if strings.Contains(low, `"code":11134`) || strings.Contains(low, `"code":"11134"`) {
+		return true
+	}
+	// Wording fallback mirrors isModelNotRegistered: the code in plain text
+	// AND the family's model-scoped wording together — either alone is not
+	// evidence (50001 frames say "service temporarily unavailable" without
+	// being this family).
+	full := strings.ToLower(payload)
+	return strings.Contains(full, "11134") && strings.Contains(full, "model provider")
+}
+
+// modelProviderFaultCopy renders the bilingual 11134 copy. The plugin parks
+// the (credential, model) pair for the conservative unknown window and
+// re-probes automatically on expiry; upstream's own advice is to switch
+// models meanwhile. Like the 6004 copy, the text never carries an HTTP
+// status — hosts without the envelope must keep reading it as request-level
+// (the model cools, the credential stays healthy).
+func modelProviderFaultCopy() string {
+	return "上游模型服务暂时不可用（code 11134）——上游建议切换其他模型或稍后重试；仅此 (账号, 模型) 组合暂停约一分钟后自动重试，同账号其他模型与池内其他账号不受影响，期间调度器会自动改用其他候选。" +
+		" // Upstream model provider is temporarily unavailable (code 11134) — upstream suggests switching to another model or retrying later; only this (credential, model) pair pauses (~1 minute, re-probed automatically), other models and credentials are unaffected; the scheduler rotates meanwhile."
+}
+
 // realmDisplayName maps a realm key to the human-readable name used in error
 // copy so users can tell WHICH gateway rejected the model.
 func realmDisplayName(realm string) string {
@@ -422,6 +478,14 @@ func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAu
 		// declared reset instant and upstream's switch-models advice.
 		resetAt, resetKnown := parseRateLimitResetAt(payload)
 		return fmt.Errorf("%s | raw: %s", modelScopedRateLimitCopy(resetAt, resetKnown),
+			truncateRedacted(payload, 200))
+	case isModelProviderFault(statusCode, payload):
+		// v0.9.89 (issue #80): the 500/11134 model-provider fault gets its
+		// own copy instead of the raw "upstream 500: {...}" pass-through —
+		// the raw shape names neither the model scoping nor the
+		// auto-rotation, and users with request-retry: 0 read it as "the
+		// pool is dead" while healthy candidates were never offered.
+		return fmt.Errorf("%s | raw: %s", modelProviderFaultCopy(),
 			truncateRedacted(payload, 200))
 	case isDailyQuotaFrame(payload):
 		// Issue #35: 每日限额得到同结构但语义明确的“今日免费额度”文案

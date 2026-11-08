@@ -20,6 +20,7 @@
 //
 //  1. recordUpstreamFailure routes a failure body into the table:
 //     rate-limit wording  -> 300 s hold,
+//     model-provider fault (500/11134, issue #80) -> 60 s hold,
 //     in-stream error frames / empty streams -> 60 s hold,
 //     hard credit exhaustion and 6004 -> deliberately NOT tabled (account
 //     level stays with the lifecycle/statusError path; 6004's declared
@@ -79,6 +80,12 @@ const (
 	// 窗口会让被限的 (账号, 模型) 对每分钟空转一次重试（最多 1440 次/天），
 	// 持有到午夜是诚实且自愈的窗口。
 	cooldownReasonDailyQuota cooldownReason = "daily_quota"
+	// cooldownReasonProviderFault（issue #80，v0.9.89）：HTTP 500 + 业务码
+	// 11134（“the model provider is temporarily unavailable, please retry
+	// later or switch to another model”）——上游自己的措辞声明这是模型级
+	// 故障，但没有声明重置时刻。保守的 60s unknown 窗口：调度器立刻轮换，
+	// 到期重探自愈。刻意不用 300s 限频档：故障不是限流，没有 Retry-After。
+	cooldownReasonProviderFault cooldownReason = "model_provider_fault"
 )
 
 type modelCooldownKey struct {
@@ -322,6 +329,21 @@ func recordUpstreamFailure(authID string, sa *storedAuth, model string, status i
 	if isHardCreditError(status, body) {
 		return
 	}
+	// Model-level provider fault (issue #80, v0.9.89): HTTP 500 + code 11134
+	// is model-scoped by the upstream's own advice but declares no reset —
+	// hold the pair at the conservative unknown window so the pick rotates
+	// and the expiry re-probe self-heals. Deliberately NOT the 300 s
+	// rate-limit tier: a fault is not a throttle. A declared reset instant
+	// in the envelope wins when parsable (none observed yet); the parse is
+	// anchored to the table clock like the daily-quota branch below.
+	if isModelProviderFault(status, body) {
+		if until, ok := parseRateLimitResetAtFrom(body, cooldownNowFn()); ok {
+			markModelCooldownUntil(authID, model, cooldownReasonProviderFault, until)
+			return
+		}
+		markModelCooldown(authID, model, cooldownReasonProviderFault)
+		return
+	}
 	if status == http.StatusTooManyRequests || isSoftRateLimit(status, body) {
 		markModelCooldown(authID, model, cooldownReasonRateLimit)
 		// #59: the account-level 429 family is also the opt-in quota-lane
@@ -488,6 +510,12 @@ func (e *cooldownFastFailError) Error() string {
 			" 重置；期间调度器会自动改用其他候选，可切换其他模型或凭证继续。" +
 			" // This model hit the upstream daily allowance for today — only this (credential, model) pair is paused, other models and credentials are unaffected, resets at " + reset +
 			"; the scheduler rotates automatically meanwhile."
+	}
+	if e.reason == cooldownReasonProviderFault {
+		return "该模型的上游服务暂时不可用（code 11134）——仅此 (账号, 模型) 组合暂停约 " + strconv.Itoa(e.seconds) +
+			" 秒后自动重试，同账号其他模型与池内其他账号不受影响；期间调度器会自动改用其他候选，无需更换凭证。" +
+			" // This model's upstream provider is temporarily unavailable (code 11134) — only this (credential, model) pair pauses for ~" + strconv.Itoa(e.seconds) +
+			"s and is re-probed automatically; other models and credentials are unaffected; the scheduler rotates meanwhile."
 	}
 	return "该 (账号, 模型) 对处于上游失败冷却中——仅此组合暂停约 " + strconv.Itoa(e.seconds) +
 		" 秒（至 " + e.until.UTC().Format(time.RFC3339) + "），同账号其他模型与池内其他账号不受影响；期间调度器会自动改用其他候选，无需更换凭证。" +
