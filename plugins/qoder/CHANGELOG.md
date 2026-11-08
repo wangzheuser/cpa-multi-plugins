@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.75
+
+### Model discovery merges the app scene — QoDuck (lmodel) is discovered (issue #79)
+
+The gateway delivers some chat-capable models ONLY in the "app" scene of
+/algo/api/v2/model/list; `callModelsAPI` extracted the "chat" scene alone,
+so those models never appeared in discovery. The report's case: QoDuck
+(upstream key `lmodel`) — vision-capable, low/high/xhigh reasoning with a
+disabled switch, 1M context, limited-time free for personal users.
+
+- `parseModelsListing` (split out of `callModelsAPI` — the merge is pure
+  response shaping, now testable without the network) decodes the chat
+  scene, then merges the app scene's unique entries in.
+- Chat stays authoritative for keys both scenes serve: an app variant of a
+  chat model never pollutes its price/permission metadata.
+- A malformed app scene is enrichment that failed, not a discovery failure
+  — the chat listing passes through untouched.
+- Aggregate placeholder ids ("auto", "default") never merge: they route
+  between models inside Qoder and are not a single model an agent can pick
+  (magpie IsRoutableModel parity). The developer scene stays unmerged.
+- QoDuck's shape rides the existing dial: thinking_config levels arrive in
+  canonical order (low, high, xhigh) with ZeroAllowed from the disabled
+  key, and the 1M max_input_tokens becomes ContextLength.
+
 ## 0.8.74
 
 ### The thinking dial survives shape drift (PR #73 follow-up)

@@ -395,9 +395,25 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models API status %d", resp.StatusCode)
 	}
+	return parseModelsListing(resp.Body)
+}
+
+// parseModelsListing decodes a model/list response body into the served
+// catalog. Split out of callModelsAPI so the scene merge is testable without
+// the network (the merge is pure response shaping).
+//
+// The "chat" scene is the authoritative source — it matches our inference
+// use case. Issue #79 (jiesou, 2026-11-07): the gateway now delivers some
+// chat-capable models ONLY in the "app" scene (QoDuck, upstream key
+// "lmodel" — vision-capable, low/high/xhigh reasoning with a disabled
+// switch, 1M context, limited-time free for personal users), so the app
+// scene's unique entries are merged in after the chat entries; a key served
+// by BOTH scenes keeps its chat entry untouched (the app variant must never
+// pollute the price/permission metadata the chat scene declares).
+func parseModelsListing(body []byte) ([]pluginapi.ModelInfo, error) {
 	// Response is plain JSON: {"chat":[{key,display_name,...}], "developer":[...], ...}
 	var apiResp map[string]json.RawMessage
-	if err := json.Unmarshal(resp.Body, &apiResp); err != nil {
+	if err := json.Unmarshal(body, &apiResp); err != nil {
 		return nil, fmt.Errorf("models parse: %w", err)
 	}
 	// Prefer the "chat" scene (matches our inference use case).
@@ -409,6 +425,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
 	}
+	models = mergeAppSceneModels(apiResp, models)
 	var out []pluginapi.ModelInfo
 	for _, m := range models {
 		if !m.Enable {
@@ -433,6 +450,37 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		return nil, fmt.Errorf("no enabled chat models")
 	}
 	return out, nil
+}
+
+// mergeAppSceneModels appends the "app" scene's unique entries to the chat
+// listing (issue #79). Chat stays authoritative for shared keys; the app
+// scene only contributes models chat does not serve. A malformed app scene
+// is enrichment that failed, not a discovery failure — the chat listing
+// passes through untouched. Aggregate placeholder ids ("auto", "default")
+// never merge: they route between models inside Qoder and are not a single
+// model an agent can pick (magpie IsRoutableModel parity).
+func mergeAppSceneModels(apiResp map[string]json.RawMessage, chatModels []chatSceneModel) []chatSceneModel {
+	appRaw, ok := apiResp["app"]
+	if !ok || len(appRaw) == 0 {
+		return chatModels
+	}
+	var appModels []chatSceneModel
+	if err := json.Unmarshal(appRaw, &appModels); err != nil {
+		return chatModels
+	}
+	seen := make(map[string]bool, len(chatModels)+len(appModels))
+	for _, m := range chatModels {
+		seen[strings.TrimSpace(m.Key)] = true
+	}
+	for _, m := range appModels {
+		key := strings.TrimSpace(m.Key)
+		if key == "" || key == "auto" || key == "default" || seen[key] {
+			continue
+		}
+		chatModels = append(chatModels, m)
+		seen[key] = true
+	}
+	return chatModels
 }
 
 func cacheModelAliases(host pluginapi.HostConfigSummary) {
